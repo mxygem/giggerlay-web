@@ -1,0 +1,37 @@
+/* Load (camera) screen. Everything scoped under .ld */
+.ld { position: fixed; inset: 0; z-index: 1000; background: #000; color: #fff; overflow: hidden;
+  font-family: -apple-system, system-ui, sans-serif; -webkit-user-select: none; user-select: none;
+  touch-action: manipulation; }
+.ld video { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
+
+/* Top panel: the stop number, filled with the zone color */
+.ld-panel { position: absolute; left: 0; right: 0; top: 0; height: 46%; padding: env(safe-area-inset-top) 12px 6px;
+  display: flex; flex-direction: column; align-items: center; justify-content: center; text-align: center;
+  background: rgba(0, 0, 0, .72); transition: background-color .15s, opacity .3s; }
+.ld-panel.stale { opacity: .55; }
+.ld-num { font-weight: 800; line-height: .95; letter-spacing: -.02em; font-variant-numeric: tabular-nums;
+  text-shadow: 0 2px 8px rgba(0, 0, 0, .35); white-space: nowrap; }
+/* Show the whole address: the unit is what tells two stops apart. */
+.ld-addr { font-size: clamp(17px, 4.8vw, 28px); font-weight: 600; margin-top: 4px; width: 100%; line-height: 1.15;
+  white-space: normal; overflow-wrap: anywhere; }
+.ld-sub { font-size: clamp(16px, 4.6vw, 26px); opacity: .92; margin-top: 2px; }
+.ld-hint { font-size: 20px; opacity: .8; }
+
+/* Guide frame: label-shaped box; the area outside is darkened */
+.ld-guide { position: absolute; left: 50%; top: 49%; transform: translateX(-50%);
+  width: min(86vw, 40vh); height: 37vh; border: 3px solid rgba(255, 255, 255, .9); border-radius: 14px;
+  box-shadow: 0 0 0 100vmax rgba(0, 0, 0, .35); pointer-events: none; }
+
+/* Footer */
+.ld-foot { position: absolute; left: 0; right: 0; bottom: 0; padding: 8px 12px calc(10px + env(safe-area-inset-bottom));
+  display: flex; align-items: center; gap: 10px; background: rgba(0, 0, 0, .75); }
+.ld-count { flex: 1; font-size: 20px; font-weight: 600; }
+.ld-btn { appearance: none; border: 0; border-radius: 12px; padding: 14px 20px; font-size: 19px; font-weight: 700;
+  background: #fff; color: #000; min-width: 84px; }
+.ld-btn.ghost { background: rgba(255, 255, 255, .18); color: #fff; }
+.ld-btn.on { background: #ffd23f; color: #000; }
+.ld-stats { position: absolute; right: 6px; top: calc(46% + 4px); font: 11px/1.2 ui-monospace, Menlo, monospace;
+  background: rgba(0, 0, 0, .55); padding: 2px 5px; border-radius: 4px; opacity: .8; pointer-events: none; }
+
+.ld-error { position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center;
+  gap: 20px; padding: 24px; text-align: center; font-size: 20px; line-height: 1.4; background: #111; }

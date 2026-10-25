@@ -1,0 +1,25 @@
+{
+  "name": "giggerlay-web",
+  "version": "1.0.0",
+  "description": "Phone web app for loading an Amazon Flex van in stop order",
+  "scripts": {
+    "test": "node --test 'test/*.test.js'",
+    "e2e": "node e2e/run.js",
+    "serve": "node e2e/serve.js"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/mxygem/giggerlay-web.git"
+  },
+  "author": "",
+  "license": "ISC",
+  "type": "module",
+  "bugs": {
+    "url": "https://github.com/mxygem/giggerlay-web/issues"
+  },
+  "homepage": "https://github.com/mxygem/giggerlay-web#readme",
+  "devDependencies": {
+    "playwright": "^1.47.2"
+  },
+  "private": true
+}

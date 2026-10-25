@@ -1,0 +1,28 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>import harness</title>
+<script type="module">
+  import { importFiles } from '../src/import/importer.js';
+  import { formatStreet } from '../src/street.js';
+
+  // Fetches each URL as a File and runs the app's real import pipeline.
+  window.runImport = async (urls) => {
+    const files = [];
+    for (const url of urls) {
+      const blob = await (await fetch(url)).blob();
+      files.push(new File([blob], url.split('/').pop(), { type: blob.type }));
+    }
+    const t0 = performance.now();
+    const res = await importFiles(files, { onProgress: () => {} });
+    return {
+      ms: Math.round(performance.now() - t0),
+      pages: res.pages.length,
+      warnings: res.warnings,
+      header: res.header,
+      stops: res.stops.map((s) => ({
+        number: s.number, street: formatStreet(s.address), packages: s.packages, guessed: s.guessed,
+      })),
+    };
+  };
+  window.harnessReady = true;
+</script>
