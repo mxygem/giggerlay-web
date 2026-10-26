@@ -5,18 +5,24 @@ import { scoreAddress } from './matcher.js';
 const SAME = 0.85; // scoreAddress at or above this = same street
 const PIN_DX = 0.03; // pin at least this far left of the street
 const PIN_DY = 0.03; // pin within this vertical distance of the street
+// Real Flex puts the pin on the "Expected by" line, one or two lines above
+// the street, so a pin may also sit up to this far above it.
+const PIN_ABOVE = 0.075;
 const ROW_TOL = 0.2; // fill tolerance, in rows
 const LOOKAHEAD = 3; // lines under a stop that belong to it
 const SAME_ROW = 0.015; // a marker this close vertically is on the stop's row
 
 const PIN_RE = /^\W*(\d{1,3})\W*$/;
 const MERGED_RE = /^\W*(\d{1,3})\W*\s+(\d+\s+\S.*)$/;
-const PICKUP_RE = /\bPICK\s?UP\b|^\W*RETURN/i;
+const PICKUP_RE = /\bPICK\s?UP\b|\bPICKED\s+UP\b|^\W*RETURN/i;
 const DELIVER_RE = /\bDELIVER\s+(\d+)\s+PACKAGES?\b/i;
 const WORD_RE = /^(?:[A-Z][A-Z'-]*|\d+(?:ST|ND|RD|TH))$/;
 
+// A pin read in front of other text, e.g. "(5) O Expected by 6:00 PM".
+const LEAD_PIN_RE = /^\W*\((\d{1,3})\)\s+\D/;
+
 const pinOf = (text) => {
-  const m = PIN_RE.exec(text.trim());
+  const m = PIN_RE.exec(text.trim()) || LEAD_PIN_RE.exec(text.trim());
   const n = m && Number(m[1]);
   return n >= 1 ? n : null;
 };
@@ -66,8 +72,12 @@ export function parsePage(lines) {
       let best = null;
       for (const p of pins) {
         if (used.has(p) || p.l.minX > r.l.minX - PIN_DX) continue;
-        const dy = Math.abs(p.l.midY - r.l.midY);
-        if (dy <= PIN_DY && (!best || dy < best.dy)) best = { p, dy };
+        const up = r.l.midY - p.l.midY; // > 0 when the pin is above
+        if (up > PIN_ABOVE || up < -PIN_DY) continue;
+        // Never take a pin from across another street line.
+        if (up > PIN_DY && rows.some((o) => o.street && o !== r && o.l.midY > p.l.midY && o.l.midY < r.l.midY)) continue;
+        const dy = Math.abs(up);
+        if (!best || dy < best.dy) best = { p, dy };
       }
       if (best) { used.add(best.p); number = best.p.pin; }
     }
@@ -91,6 +101,12 @@ export function parsePage(lines) {
       if (d && c.packages == null) c.packages = Number(d[1]);
     }
     if (PICKUP_RE.test(c.row.l.text)) c.pickup = true;
+    // Real Flex shows "Picked up at 4:24 PM" just above the station's street.
+    const above = rows[c.idx - 1];
+    if (above && !claimed.has(above) && PICKUP_RE.test(above.l.text) && c.row.l.midY - above.l.midY <= 0.05) {
+      claimed.add(above);
+      c.pickup = true;
+    }
   });
 
   // Pickup markers without a street (e.g. the station row): take a pin above.
@@ -247,21 +263,45 @@ export function mergePages(pages) {
 
   // Unnumbered readings: drop if known, else previous stop on the page + 1.
   const findKnown = (a) => [...known.values()].find((k) => scoreAddress(a, k.address) >= SAME);
-  for (const p of pages) {
-    const nums = p.stops.map((s) => (s.number != null && !isPickup(s) ? s.number : null));
-    p.stops.forEach((s, i) => {
-      if (s.number != null || isPickup(s)) return;
+  const nums = pages.map((p) => p.stops.map((s) => (s.number != null && !isPickup(s) ? s.number : null)));
+  const add = (s, n) => {
+    const stop = { number: n, address: s.address, guessed: true };
+    if (s.packages !== undefined) stop.packages = s.packages;
+    known.set(n, stop);
+  };
+  // Repeat until nothing changes, so pages anchored only through another
+  // page's guesses (overlapping screenshots) still resolve.
+  for (let changed = true; changed;) {
+    changed = false;
+    pages.forEach((p, pi) => p.stops.forEach((s, i) => {
+      if (nums[pi][i] != null || isPickup(s)) return;
       const k = findKnown(s.address);
-      if (k) { nums[i] = k.number; return; }
-      const prev = nums.slice(0, i).reverse().find((n) => n != null);
-      const next = prev == null ? nums.slice(i + 1).find((n) => n != null) : null;
+      if (k) { nums[pi][i] = k.number; changed = true; return; }
+      // Only the stop directly above or below on the same page counts.
+      const prev = i > 0 ? nums[pi][i - 1] : null;
+      const next = prev == null && i + 1 < nums[pi].length ? nums[pi][i + 1] : null;
       const n = prev != null ? prev + 1 : next != null ? next - 1 : null;
       if (n == null || n < 1 || known.has(n) || pickNums.has(n)) return;
-      const stop = { number: n, address: s.address, guessed: true };
-      if (s.packages !== undefined) stop.packages = s.packages;
-      known.set(n, stop);
-      nums[i] = n;
-    });
+      add(s, n);
+      nums[pi][i] = n;
+      changed = true;
+    }));
+    // No pin read anywhere: number the first page's first stop as the first
+    // delivery (stop 2, after the station) and let the rest follow it.
+    if (!changed && known.size === 0) {
+      // Prefer the top page: one whose first stop isn't further down another page.
+      const firstOf = (p) => p.stops.find((s) => !isPickup(s));
+      const below = (p, q) => q !== p && q.stops.some((s, i) => i > 0 && !isPickup(s) && scoreAddress(firstOf(p).address, s.address) >= SAME);
+      const cands = pages.filter(firstOf);
+      const top = cands.find((p) => !cands.some((q) => below(p, q))) || cands[0];
+      const pi = top ? pages.indexOf(top) : -1;
+      if (pi >= 0) {
+        const i = pages[pi].stops.findIndex((s) => !isPickup(s));
+        add(pages[pi].stops[i], 2);
+        nums[pi][i] = 2;
+        changed = true;
+      }
+    }
   }
 
   const out = { stops: [...known.values()].sort((a, b) => a.number - b.number) };

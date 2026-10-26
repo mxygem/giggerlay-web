@@ -254,3 +254,29 @@ test('two well-read stops at one address both survive the misread-pin guard', ()
   const p = page([{ pin: 21, street: '20225 MACK AVE APT 12' }, { pin: 22, street: '20225 MACK AVE APT 12' }], { header: false });
   assert.deepEqual(nums(mergePages([parsePage(p), parsePage(p)])), [21, 22]);
 });
+
+// Real Flex layout: pin on the "Expected by" line above the street.
+function realBlock(y, pin, street, pkgs) {
+  const out = [];
+  if (pin != null) out.push(L(`(${pin}) O Expected by 6:00 PM`, y, 0.06));
+  else out.push(L('© Expected by 6:00 PM', y, 0.15));
+  out.push(L(street, y + 0.027, 0.15), L('GLENDALE', y + 0.048, 0.15), L(`Deliver ${pkgs} packages`, y + 0.077, 0.15));
+  return out;
+}
+
+test('real layout: pin on the line above the street pairs with that street', () => {
+  const r = parsePage([...realBlock(0.29, 4, '4910 W Wahalla Ln', 4), ...realBlock(0.43, 5, '17500 N 67TH AVE APT 1093', 4)]);
+  assert.deepEqual(r.stops.map((s) => [s.number, fmt(s)]), [[4, '4910 W WAHALLA LN'], [5, '17500 N 67TH AVE APT 1093']]);
+});
+
+test('no pins read anywhere: stops are numbered in order from 2, all guessed', () => {
+  const r = parsePage([...realBlock(0.4, null, '4950 E VAN BUREN ST APT 126', 4), ...realBlock(0.55, null, '20428 N 55TH AVE', 1)]);
+  const m = mergePages([r]);
+  assert.deepEqual(m.stops.map((s) => [s.number, s.guessed]), [[2, true], [3, true]]);
+});
+
+test('"Picked up at 4:24 PM" row is a pickup', () => {
+  const r = parsePage([L('Picked up at 4:24 PM', 0.2, 0.15), L('500 S 48th St', 0.23, 0.15), L('PHOENIX', 0.26, 0.15)]);
+  assert.equal(r.stops.length, 0);
+  assert.equal(r.pickups.length, 1);
+});
