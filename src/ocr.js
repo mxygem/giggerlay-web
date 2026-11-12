@@ -69,12 +69,17 @@ export async function recognize(source, opts = {}) {
     ctx.imageSmoothingEnabled = true;
     ctx.imageSmoothingQuality = 'high';
     ctx.drawImage(source, x, y, w, h, 0, 0, canvas.width, canvas.height);
-    if (opts.prepare !== false) prepare(ctx, canvas.width, canvas.height);
+    const pins = opts.prepare !== false ? prepare(ctx, canvas.width, canvas.height) : [];
     const worker = await getWorker();
     const psm = String(opts.psm ?? DEFAULT_PSM);
     if (psm !== curPSM) { await worker.setParameters({ tessedit_pageseg_mode: psm }); curPSM = psm; }
     const { data } = await worker.recognize(canvas);
-    return toLines(data.lines ?? [], canvas.width, canvas.height);
+    const lines = toLines(data.lines ?? [], canvas.width, canvas.height);
+    if (opts.pins === false) return lines;
+    // Pins read on their own replace whatever the page pass made of them.
+    const pinLines = await readPins(worker, canvas, pins, canvas.width, canvas.height);
+    const kept = lines.filter((l) => !pinLines.some((p) => Math.abs(l.midY - p.midY) < 1.5 * p.height && l.maxX <= p.maxX + 0.04));
+    return [...kept, ...pinLines].sort((a, b) => a.midY - b.midY || a.minX - b.minX);
   } finally {
     bitmap?.close?.();
   }
@@ -99,9 +104,15 @@ export function prepare(ctx, w, h) {
     const row = ((y / G) | 0) * gw;
     for (let x = 0, i = y * w * 4; x < w; x++, i += 4) { acc[row + ((x / G) | 0)] += d[i]; cnt[row + ((x / G) | 0)]++; }
   }
-  const mask = new Uint8Array(gw * gh); // 1 dark, 2 visited
-  for (let c = 0; c < mask.length; c++) mask[c] = acc[c] < 100 * cnt[c] ? 1 : 0;
-  const minD = (0.045 * w) / G, maxD = (0.14 * w) / G, stack = [];
+  // Light pages: pins are dark discs. Dark pages (inverted above): Flex's
+  // pins are mid-tone (blue, green or gray) discs, so after inversion they
+  // are mid-gray on white; look for those instead.
+  const mask = new Uint8Array(gw * gh); // 1 candidate, 2 visited
+  for (let c = 0; c < mask.length; c++) {
+    const v = acc[c] / cnt[c];
+    mask[c] = inv ? (v > 110 && v < 225 ? 1 : 0) : (v < 100 ? 1 : 0);
+  }
+  const minD = (0.045 * w) / G, maxD = (0.14 * w) / G, stack = [], pins = [];
   for (let c0 = 0; c0 < mask.length; c0++) {
     if (mask[c0] !== 1) continue;
     let x0 = gw, y0 = gh, x1 = -1, y1 = -1, n = 0, lum = 0;
@@ -123,6 +134,27 @@ export function prepare(ctx, w, h) {
     const lo = lum / n, cxp = (x0 + bw / 2) * G, cyp = (y0 + bh / 2) * G, rx = (bw * G) / 2, ry = (bh * G) / 2;
     const px0 = Math.max(0, Math.floor(cxp - rx - G)), px1 = Math.min(w, Math.ceil(cxp + rx + G));
     const py0 = Math.max(0, Math.floor(cyp - ry - G)), py1 = Math.min(h, Math.ceil(cyp + ry + G));
+    // Stop pins sit in the left column (the "?" help button is also a disc).
+    const isPin = cxp < 0.25 * w;
+    if (isPin && !inv) pins.push({ x0: Math.max(0, cxp - rx * 0.75), x1: Math.min(w, cxp + rx * 0.75), y0: Math.max(0, cyp - ry * 0.75), y1: Math.min(h, cyp + ry * 0.75) });
+    if (inv) {
+      // Mid-gray disc with a black digit (white in the original): the digit
+      // stays black, everything else in the disc turns white.
+      // The box around it (pin tail, timeline line) is cleared too, so the
+      // digit stands alone: Tesseract skips a lone digit with marks beside it.
+      const qy0 = Math.max(0, Math.floor(cyp - 1.6 * ry)), qy1 = Math.min(h, Math.ceil(cyp + 2.4 * ry));
+      const qx0 = Math.max(0, Math.floor(cxp - 1.4 * rx)), qx1 = Math.min(w, Math.ceil(cxp + 2 * rx));
+      let bx0 = w, by0 = h, bx1 = -1, by1 = -1;
+      for (let y = qy0; y < qy1; y++) for (let x = qx0; x < qx1; x++) {
+        const e = ((x - cxp) / rx) ** 2 + ((y - cyp) / ry) ** 2, i = (y * w + x) * 4;
+        const ink = e < 0.6 && d[i] < lo - 50;
+        d[i] = ink ? 0 : 255;
+        if (ink) { if (x < bx0) bx0 = x; if (x > bx1) bx1 = x; if (y < by0) by0 = y; if (y > by1) by1 = y; }
+      }
+      // The digit's own box, for reading it on its own.
+      if (isPin && bx1 > bx0 && by1 > by0) pins.push({ x0: bx0, x1: bx1 + 1, y0: by0, y1: by1 + 1 });
+      continue;
+    }
     for (let y = py0; y < py1; y++) for (let x = px0; x < px1; x++) {
       const e = ((x - cxp) / rx) ** 2 + ((y - cyp) / ry) ** 2, i = (y * w + x) * 4;
       if (e < 0.6) d[i] = Math.max(0, Math.min(255, 255 - ((d[i] - lo) * 255) / (255 - lo))); // inner: invert
@@ -131,6 +163,48 @@ export function prepare(ctx, w, h) {
   }
   for (let i = 0; i < d.length; i += 4) d[i + 1] = d[i + 2] = d[i];
   ctx.putImageData(img, 0, 0);
+  return pins;
+}
+
+/**
+ * Read each cleaned pin on its own as one line of digits. Tesseract's page
+ * layout often drops a lone digit or glues it to the line beside it.
+ * Returns OCRLines in the canvas's 0-1 coordinates.
+ */
+async function readPins(worker, src, pins, cw, ch) {
+  const out = [];
+  if (!pins.length) return out;
+  const pc = document.createElement('canvas');
+  await worker.setParameters({ tessedit_pageseg_mode: '7', tessedit_char_whitelist: '0123456789' });
+  curPSM = null;
+  try {
+    for (const p of pins) {
+      const bw = p.x1 - p.x0, bh = p.y1 - p.y0;
+      if (!(bw > 2 && bh > 2)) continue;
+      const k = 48 / bh, pad = 24;
+      if (bw > 4 * bh) continue; // not a 1-3 digit number
+      pc.width = Math.round(bw * k) + 2 * pad;
+      pc.height = Math.round(bh * k) + 2 * pad;
+      const c = pc.getContext('2d');
+      c.fillStyle = '#fff';
+      c.fillRect(0, 0, pc.width, pc.height);
+      c.imageSmoothingQuality = 'high';
+      c.drawImage(src, p.x0, p.y0, bw, bh, pad, pad, bw * k, bh * k);
+      const { data } = await worker.recognize(pc);
+      const text = (data.text ?? '').replace(/\D/g, '');
+      // The ink's width must fit the digit count (measured on Flex's pins:
+      // one digit 0.48-0.83 of its height, two digits 1.0-1.57). A read that
+      // doesn't fit ("1" for 11) is dropped; row spacing fills it instead.
+      const r = bw / bh, fits = text.length === 1 ? r < 0.92 : text.length === 2 ? r >= 0.9 && r < 2 : r >= 1.4;
+      if (/^[1-9]\d{0,2}$/.test(text) && fits && (data.confidence ?? 100) >= 60) {
+        out.push({ text, midY: (p.y0 + p.y1) / 2 / ch, minX: p.x0 / cw, maxX: p.x1 / cw, height: bh / ch, pin: true });
+      }
+    }
+  } finally {
+    await worker.setParameters({ tessedit_char_whitelist: '' });
+    pc.width = pc.height = 0;
+  }
+  return out;
 }
 
 /** Map Tesseract lines (pixel bbox) to normalized OCRLines sorted by midY. */

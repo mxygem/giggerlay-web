@@ -23,7 +23,7 @@ const WORD_RE = /^(?:[A-Z][A-Z'-]*|\d+(?:ST|ND|RD|TH))$/;
 const LEAD_PIN_RE = /^\W*\((\d{1,3})\)\s+\D/;
 
 // A pin OCR'd onto the card's first line: "12 Expected by 6:00 AM".
-const CARD_PIN_RE = /^\W*\(?(\d{1,3})\)?[.)]?\s+(?=(?:expected|next stop|picked up)\b)/i;
+const CARD_PIN_RE = /^\W*\(?(\d{1,3})\)?[.)]?\s+(?=[^A-Za-z0-9]{0,3}(?:expected|next stop|picked up)\b)/i;
 
 const pinOf = (text) => {
   const m = PIN_RE.exec(text.trim()) || LEAD_PIN_RE.exec(text.trim()) || CARD_PIN_RE.exec(text.trim());

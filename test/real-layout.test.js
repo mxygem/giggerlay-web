@@ -47,6 +47,9 @@ test('real layout: pin read on the same line as "Expected by"', () => {
   const lines = screen([{ pin: null, street: '100 W MAIN ST' }, { pin: null, street: '200 W MAIN ST' }])
     .map((l) => (l.text === 'Expected by 6:00 AM' ? { ...l, text: `${l.midY < 0.2 ? 7 : 8} Expected by 6:00 AM`, minX: 0.07 } : l));
   assert.deepEqual(parsePage(lines).stops.map((s) => s.number), [7, 8]);
+  // With the clock icon OCR'd in between (Gem's 11/12 screenshots).
+  const icon = lines.map((l) => ({ ...l, text: l.text.replace(' Expected', ' © Expected') }));
+  assert.deepEqual(parsePage(icon).stops.map((s) => s.number), [7, 8]);
 });
 
 test('real layout: a card whose pin was not read never takes the pin of the card above', () => {
