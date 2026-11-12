@@ -1,13 +1,14 @@
 // Flex Itinerary > List parsing: one page at a time, then merged across pages.
-import { parseStreet, formatStreet } from './street.js';
-import { scoreAddress } from './matcher.js';
+import { parseStreet, parseTypelessStreet, formatStreet } from './street.js';
+import { scoreAddress, nameSimilarity } from './matcher.js';
 
 const SAME = 0.85; // scoreAddress at or above this = same street
 const PIN_DX = 0.03; // pin at least this far left of the street
 const PIN_DY = 0.03; // pin within this vertical distance of the street
-// Real Flex puts the pin on the "Expected by" line, one or two lines above
-// the street, so a pin may also sit up to this far above it.
-const PIN_ABOVE = 0.075;
+// Real Flex puts the pin on the card's first line ("Expected by"), measured
+// 0.056 above the street, 0.08 on the "Next Stop" card. A pin may sit up to
+// this far above its street (never across another street line).
+const PIN_ABOVE = 0.12;
 const ROW_TOL = 0.2; // fill tolerance, in rows
 const LOOKAHEAD = 3; // lines under a stop that belong to it
 const SAME_ROW = 0.015; // a marker this close vertically is on the stop's row
@@ -21,8 +22,11 @@ const WORD_RE = /^(?:[A-Z][A-Z'-]*|\d+(?:ST|ND|RD|TH))$/;
 // A pin read in front of other text, e.g. "(5) O Expected by 6:00 PM".
 const LEAD_PIN_RE = /^\W*\((\d{1,3})\)\s+\D/;
 
+// A pin OCR'd onto the card's first line: "12 Expected by 6:00 AM".
+const CARD_PIN_RE = /^\W*\(?(\d{1,3})\)?[.)]?\s+(?=(?:expected|next stop|picked up)\b)/i;
+
 const pinOf = (text) => {
-  const m = PIN_RE.exec(text.trim()) || LEAD_PIN_RE.exec(text.trim());
+  const m = PIN_RE.exec(text.trim()) || LEAD_PIN_RE.exec(text.trim()) || CARD_PIN_RE.exec(text.trim());
   const n = m && Number(m[1]);
   return n >= 1 ? n : null;
 };
@@ -35,15 +39,45 @@ function stopStreet(text) {
   return a.name.split(' ').every((t) => WORD_RE.test(t)) ? a : null;
 }
 
+// A street with no type ("1721 S. Lemon"): counts only when the card around
+// it looks like a stop (checked in parsePage).
+const CARD_WORDS = /^(EXPECTED|NEXT|PICK|PICKED|DELIVER|RETURN|SCHEDULED)\b/;
+function typelessStreet(text) {
+  if (/SCHEDULED/i.test(text)) return null;
+  const a = parseTypelessStreet(text);
+  return a && !CARD_WORDS.test(a.name) ? a : null;
+}
+
 // Street line, possibly with its pin merged in front ("9 1007 ANITA AVE").
 function readStreetLine(text) {
   const m = MERGED_RE.exec(text.trim());
   if (m && Number(m[1]) >= 1) {
     const a = stopStreet(m[2]);
     if (a) return { address: a, pin: Number(m[1]) };
+    const t = typelessStreet(m[2]);
+    if (t) return { address: t, pin: Number(m[1]), typeless: true };
   }
   const a = stopStreet(text);
-  return a ? { address: a, pin: null } : null;
+  if (a) return { address: a, pin: null };
+  const t = typelessStreet(text);
+  return t ? { address: t, pin: null, typeless: true } : null;
+}
+
+// "MESA", "Gilbert", "GROSSE POINTE WOODS".
+const isCityLine = (text) => {
+  const u = text.trim().toUpperCase();
+  return /^[A-Z][A-Z .'-]{2,30}$/.test(u) && !/^(DELIVER|PICK|EXPECTED|NEXT|RETURN)/.test(u);
+};
+const UNIT_LINE = /^(APT|AP|APARTMENT|UNIT|STE|SUITE|#|BLDG|LOT|SPC|RM)\b/i;
+
+// A typeless street is a stop only with a city line right below (after any
+// unit line) and "Deliver N package" just after that.
+function typelessCardOk(rows, idx) {
+  const below = rows.slice(idx + 1, idx + 5).map((r) => r.l.text.trim());
+  let k = 0;
+  while (k < below.length && UNIT_LINE.test(below[k])) k++;
+  if (!below[k] || !isCityLine(below[k])) return false;
+  return below.slice(k + 1, k + 3).some((t) => DELIVER_RE.test(t));
 }
 
 const streetKey = (a) => `${a.number} ${a.name}`;
@@ -61,6 +95,7 @@ export function parsePage(lines) {
 
   // Classify lines.
   const rows = lines.map((l) => ({ l, pin: pinOf(l.text), street: readStreetLine(l.text) }));
+  rows.forEach((r, i) => { if (r.street?.typeless && !typelessCardOk(rows, i)) r.street = null; });
   const pins = rows.filter((r) => r.pin);
   const used = new Set();
   const cands = []; // {row, idx, address, number, pickup, packages}
@@ -101,9 +136,10 @@ export function parsePage(lines) {
       if (d && c.packages == null) c.packages = Number(d[1]);
     }
     if (PICKUP_RE.test(c.row.l.text)) c.pickup = true;
-    // Real Flex shows "Picked up at 4:24 PM" just above the station's street.
-    const above = rows[c.idx - 1];
-    if (above && !claimed.has(above) && PICKUP_RE.test(above.l.text) && c.row.l.midY - above.l.midY <= 0.05) {
+    // Real Flex shows "Picked up at 2:21 AM" on the station card's first
+    // line, about 0.056 above its street.
+    for (const above of rows.slice(Math.max(0, c.idx - 3), c.idx)) {
+      if (above.pin || claimed.has(above) || !PICKUP_RE.test(above.l.text) || c.row.l.midY - above.l.midY > 0.065) continue;
       claimed.add(above);
       c.pickup = true;
     }
@@ -118,12 +154,12 @@ export function parsePage(lines) {
       const dy = r.l.midY - p.l.midY;
       if (dy >= -PIN_DY && dy <= 0.1 && (!best || Math.abs(dy) < Math.abs(best.dy))) best = { p, dy };
     }
-    if (best) { used.add(best.p); reading.pickups.push({ number: best.p.pin }); }
+    if (best) { used.add(best.p); reading.pickups.push({ number: best.p.pin, midY: r.l.midY }); }
   }
 
   for (const c of cands) {
     if (c.pickup) {
-      const p = { address: c.address };
+      const p = { address: c.address, midY: c.row.l.midY };
       if (c.number != null) p.number = c.number;
       reading.pickups.push(p);
       continue;
@@ -207,7 +243,7 @@ function vote(values) {
   return best;
 }
 
-// Pick the street for one stop number from its readings (in order seen).
+// Pick the street for one stop from its readings (in order seen).
 function voteStreet(addrs) {
   const clusters = [];
   for (const a of addrs) {
@@ -225,86 +261,176 @@ function voteStreet(addrs) {
   return [...exact].sort(rank)[0][0];
 }
 
+// One stop as seen across pages.
+class Cluster {
+  constructor(r) { this.readings = [r]; }
+  add(r) { this.readings.push(r); this._n = this._b = undefined; }
+  // Majority pin; ties go to the lower number.
+  get number() {
+    if (this._n === undefined) {
+      const counts = new Map();
+      for (const r of this.readings) if (r.number != null) counts.set(r.number, (counts.get(r.number) || 0) + 1);
+      let best = null;
+      for (const [n, c] of counts) if (best == null || c > counts.get(best) || (c === counts.get(best) && n < best)) best = n;
+      this._n = best;
+    }
+    return this._n;
+  }
+  get best() { return this._b ??= voteStreet(this.readings.map((r) => r.address)); }
+  get pages() { return new Set(this.readings.map((r) => r.page)); }
+  stop(number, guessed) {
+    const stop = { number, address: this.best, guessed };
+    const pk = vote(this.readings.map((r) => r.packages).filter((v) => v !== undefined));
+    if (pk !== undefined) stop.packages = pk;
+    return stop;
+  }
+}
+
+// Clearly the same stop: the same pin, or (when either has none) the same address.
+function sameStop(r, c) {
+  if (r.number != null && c.number != null) return r.number === c.number;
+  return c.readings.some((o) => scoreAddress(o.address, r.address) >= SAME);
+}
+
+// Could be a misread of this stop, given it sits in the same place in the list:
+// same house number, or a same-length number with <= 2 digits off and a
+// similar name. Turns "3552 b Enid Ave" into a vote for 3332 E Enid Ave.
+function lookalike(r, c) {
+  if (r.number != null && c.number != null && r.number !== c.number) return false;
+  const a = r.address, b = c.best;
+  if (a.number === b.number) return true;
+  if (a.number.length !== b.number.length) return false;
+  let off = 0;
+  for (let i = 0; i < a.number.length; i++) if (a.number[i] !== b.number[i]) off++;
+  return off <= 2 && nameSimilarity(a.name, b.name) >= 0.6;
+}
+
+// Add one page's readings to the ordered list of stops. Readings that clearly
+// match a known stop anchor the page; the others are placed between anchors,
+// joining the stop in their position when they look like it.
+function place(page, order) {
+  const anchor = page.map(() => null);
+  let last = -1;
+  page.forEach((r, i) => {
+    const matches = [];
+    order.forEach((c, k) => { if (sameStop(r, c)) matches.push(k); });
+    // Two stops can share an address: take the one after the page's last anchor.
+    const k = matches.find((m) => m > last) ?? matches[0];
+    if (k === undefined) return;
+    anchor[i] = order[k];
+    last = Math.max(last, k);
+  });
+  page.forEach((r, i) => anchor[i]?.add(r));
+
+  for (let i = 0; i < page.length;) {
+    if (anchor[i]) { i++; continue; }
+    let j = i;
+    while (j < page.length && !anchor[j]) j++;
+    fill(page.slice(i, j), i > 0 ? anchor[i - 1] : null, j < page.length ? anchor[j] : null, order);
+    i = j;
+  }
+}
+
+function fill(run, a, b, order) {
+  if (a) {
+    let slot = order.indexOf(a) + 1;
+    for (const r of run) {
+      const end = b ? order.indexOf(b) : order.length;
+      let k;
+      if (slot < end && lookalike(r, order[slot])) {
+        order[slot++].add(r);
+      } else if (b && slot < end && (k = order.slice(slot + 1, end).findIndex((c) => lookalike(r, c))) >= 0) {
+        // The rows in between weren't read on this page.
+        k += slot + 1;
+        order[k].add(r);
+        slot = k + 1;
+      } else {
+        order.splice(slot++, 0, new Cluster(r));
+      }
+    }
+  } else if (b) {
+    // Top of the page: work upward from the first anchor.
+    let slot = order.indexOf(b) - 1;
+    for (const r of [...run].reverse()) {
+      if (slot >= 0 && lookalike(r, order[slot])) order[slot--].add(r);
+      else order.splice(slot + 1, 0, new Cluster(r));
+    }
+  } else {
+    // Nothing on this page was seen before.
+    for (const r of run) order.push(new Cluster(r));
+  }
+}
+
+// An unpinned stop seen in under half of the 3+ pages that show both its
+// neighbors is a misread that found no stop to vote for.
+function dropPhantoms(order) {
+  const kept = [...order];
+  for (let i = 1; i < kept.length - 1;) {
+    const c = kept[i];
+    const prev = kept[i - 1].pages, next = kept[i + 1].pages;
+    const both = [...prev].filter((p) => next.has(p)).length;
+    if (c.number == null && both >= 3 && c.pages.size * 2 < both) kept.splice(i, 1);
+    else i++;
+  }
+  return kept;
+}
+
 /**
- * Merge page readings into one stop list.
+ * Merge page readings into one stop list. Readings are lined up across pages
+ * into one ordered list; each stop takes its most common street, pin and
+ * package count. Numbers: the pin when read, else previous + 1 (guessed); the
+ * station counts as stop 1 even when it wasn't read.
  * @param {import('./contracts.js').PageReading[]} pages
  * @returns {{stops: import('./contracts.js').RouteStop[], header?: string}}
  */
 export function mergePages(pages) {
   const pickNums = new Set();
-  const pickStreets = new Set();
+  const pickStreets = [];
   for (const p of pages) for (const k of p.pickups || []) {
     if (k.number != null) pickNums.add(k.number);
-    if (k.address) pickStreets.add(streetKey(k.address));
-  }
-  const isPickup = (s) => (s.number != null && pickNums.has(s.number)) || pickStreets.has(streetKey(s.address));
-
-  // Numbered readings, voted per number.
-  const byNum = new Map();
-  for (const p of pages) for (const s of p.stops) {
-    if (s.number == null || isPickup(s)) continue;
-    if (!byNum.has(s.number)) byNum.set(s.number, []);
-    byNum.get(s.number).push(s);
-  }
-  const known = new Map();
-  for (const [n, rs] of byNum) {
-    const stop = { number: n, address: voteStreet(rs.map((r) => r.address)), guessed: false };
-    const pk = vote(rs.map((r) => r.packages).filter((v) => v !== undefined));
-    if (pk !== undefined) stop.packages = pk;
-    known.set(n, stop);
-  }
-  // A number read only once whose street won under a better-supported number
-  // is a misread pin, not a second stop at that address.
-  for (const [n, rs] of byNum) {
-    if (rs.length !== 1) continue;
-    const key = formatStreet(known.get(n).address);
-    if ([...byNum].some(([m, o]) => m !== n && o.length > 1 && formatStreet(known.get(m).address) === key)) known.delete(n);
+    if (k.address) pickStreets.push(k.address);
   }
 
-  // Unnumbered readings: drop if known, else previous stop on the page + 1.
-  const findKnown = (a) => [...known.values()].find((k) => scoreAddress(a, k.address) >= SAME);
-  const nums = pages.map((p) => p.stops.map((s) => (s.number != null && !isPickup(s) ? s.number : null)));
-  const add = (s, n) => {
-    const stop = { number: n, address: s.address, guessed: true };
-    if (s.packages !== undefined) stop.packages = s.packages;
-    known.set(n, stop);
-  };
-  // Repeat until nothing changes, so pages anchored only through another
-  // page's guesses (overlapping screenshots) still resolve.
-  for (let changed = true; changed;) {
-    changed = false;
-    pages.forEach((p, pi) => p.stops.forEach((s, i) => {
-      if (nums[pi][i] != null || isPickup(s)) return;
-      const k = findKnown(s.address);
-      if (k) { nums[pi][i] = k.number; changed = true; return; }
-      // Only the stop directly above or below on the same page counts.
-      const prev = i > 0 ? nums[pi][i - 1] : null;
-      const next = prev == null && i + 1 < nums[pi].length ? nums[pi][i + 1] : null;
-      const n = prev != null ? prev + 1 : next != null ? next - 1 : null;
-      if (n == null || n < 1 || known.has(n) || pickNums.has(n)) return;
-      add(s, n);
-      nums[pi][i] = n;
-      changed = true;
-    }));
-    // No pin read anywhere: number the first page's first stop as the first
-    // delivery (stop 2, after the station) and let the rest follow it.
-    if (!changed && known.size === 0) {
-      // Prefer the top page: one whose first stop isn't further down another page.
-      const firstOf = (p) => p.stops.find((s) => !isPickup(s));
-      const below = (p, q) => q !== p && q.stops.some((s, i) => i > 0 && !isPickup(s) && scoreAddress(firstOf(p).address, s.address) >= SAME);
-      const cands = pages.filter(firstOf);
-      const top = cands.find((p) => !cands.some((q) => below(p, q))) || cands[0];
-      const pi = top ? pages.indexOf(top) : -1;
-      if (pi >= 0) {
-        const i = pages[pi].stops.findIndex((s) => !isPickup(s));
-        add(pages[pi].stops[i], 2);
-        nums[pi][i] = 2;
-        changed = true;
-      }
+  let order = [];
+  pages.forEach((p, pi) => {
+    const readings = [
+      ...p.stops.map((s) => ({ number: s.number, address: s.address, packages: s.packages, midY: s.midY, page: pi })),
+      ...(p.pickups || []).filter((k) => k.address).map((k) => ({ number: k.number ?? null, address: k.address, midY: k.midY ?? 0, page: pi, pickup: true })),
+    ].sort((a, b) => a.midY - b.midY);
+    place(readings, order);
+  });
+  order = dropPhantoms(order);
+
+  const isPickup = (c) => c.readings.some((r) => r.pickup) ||
+    (c.number != null && pickNums.has(c.number)) ||
+    c.readings.some((r) => pickStreets.some((a) => scoreAddress(a, r.address) >= SAME));
+
+  const result = new Map(); // number -> {stop, cluster}
+  let previous = 1; // the station is stop 1
+  order.forEach((c, i) => {
+    if (isPickup(c)) { previous = c.number ?? Math.max(previous, 1); return; }
+    if (c.number != null) {
+      if (!result.has(c.number)) result.set(c.number, { stop: c.stop(c.number, false), c });
+      previous = c.number;
+      return;
     }
+    previous++;
+    // No room before the next numbered stop: the count is off somewhere, and
+    // a wrong number is worse than none (the review shows the gap instead).
+    const next = order.slice(i + 1).find((o) => !isPickup(o) && o.number != null)?.number;
+    if (next != null && previous >= next) return;
+    if (!result.has(previous)) result.set(previous, { stop: c.stop(previous, true), c });
+  });
+
+  // A number read once whose street won under a better-read number is a
+  // misread pin, not a second stop at that address.
+  for (const [n, { stop, c }] of [...result]) {
+    if (stop.guessed || c.readings.length !== 1) continue;
+    const key = formatStreet(stop.address);
+    if ([...result].some(([m, o]) => m !== n && o.c.readings.length > 1 && formatStreet(o.stop.address) === key)) result.delete(n);
   }
 
-  const out = { stops: [...known.values()].sort((a, b) => a.number - b.number) };
+  const out = { stops: [...result.values()].map((v) => v.stop).sort((a, b) => a.number - b.number) };
   const header = pages.map((p) => p.header).find(Boolean);
   if (header) out.header = header;
   return out;

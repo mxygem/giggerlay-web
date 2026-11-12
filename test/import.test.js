@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { slicePlan } from '../src/import/slice.js';
-import { sharpness } from '../src/import/sharpness.js';
+import { sharpness, measure } from '../src/import/sharpness.js';
 import { fingerprint, fingerprintDiff, FP_W, FP_H } from '../src/import/fingerprint.js';
 import { pickFrames } from '../src/import/frames.js';
 
@@ -37,12 +37,23 @@ test('slicePlan: degenerate sizes', () => {
   assert.deepEqual(slicePlan(0, 100), []);
 });
 
-test('sharpness: flat is 0, horizontal stripes high, vertical stripes 0', () => {
-  assert.equal(sharpness(img(20, 20, () => 128)), 0);
-  assert.equal(sharpness(img(20, 20, (x, y) => (y % 2 ? 255 : 0))), 255);
-  assert.equal(sharpness(img(20, 20, (x) => (x % 2 ? 255 : 0))), 0);
-  const blur = sharpness(img(20, 40, (x, y) => (y % 8) * 30)); // smooth ramps
-  assert.ok(blur > 0 && blur < 255);
+test('sharpness: vertical over horizontal change; blank frames count as sharp', () => {
+  assert.equal(sharpness(img(20, 20, () => 128)), 1); // nothing on it to lose
+  assert.equal(sharpness(img(20, 20, (x) => (x % 2 ? 255 : 0))), 0); // fully smeared vertically
+  // "Text": short lines of glyph strokes with gaps between lines.
+  const text = (x, y) => (y % 12 < 6 && (x * 7 + Math.floor(y / 2) * 3) % 5 < 2 ? 255 : 0);
+  const sharp = sharpness(img(40, 48, text));
+  // Smeared vertically by a fast scroll (10 rows): drops.
+  const smear = (x, y) => { let t = 0; for (let k = 0; k < 10; k++) t += text(x, y + k); return t / 10; };
+  assert.ok(sharpness(img(40, 48, smear)) < sharp * 0.7);
+});
+
+test('sharpness: less text on screen does not read as blur', () => {
+  const text = (x, y) => (y % 12 < 6 && (x * 7 + Math.floor(y / 2) * 3) % 5 < 2 ? 255 : 0);
+  const full = measure(img(40, 96, text));
+  const sparse = measure(img(40, 96, (x, y) => (y < 12 ? text(x, y) : 0))); // end of the list
+  assert.ok(sparse.detail < full.detail / 3);
+  assert.ok(sparse.sharpness > full.sharpness * 0.8, `${sparse.sharpness} vs ${full.sharpness}`);
 });
 
 test('fingerprint: 24x52, identical = 0, different > 2', () => {
@@ -67,11 +78,19 @@ test('pickFrames: sharpest per 0.4s window above threshold', () => {
   assert.ok(Math.abs(r.threshold - 0.88 * 13) < 1e-9);
 });
 
-test('pickFrames: interior blurry window warns', () => {
-  const r = pickFrames(series([10, 10, 10, 10, 2, 3, 2, 1, 10, 10, 10, 10]));
-  assert.deepEqual(r.times, [0, 0.8]);
+test('pickFrames: interior blurry stretch of 2+ windows warns, one window does not', () => {
+  const r = pickFrames(series([10, 10, 10, 10, 2, 3, 2, 1, 2, 1, 2, 1, 10, 10, 10, 10]));
+  assert.deepEqual(r.times, [0, 1.2]);
   assert.equal(r.skippedBlurry, true);
-  assert.equal(r.skipped, 1);
+  assert.equal(r.skipped, 2);
+  const one = pickFrames(series([10, 10, 10, 10, 2, 3, 2, 1, 10, 10, 10, 10]));
+  assert.equal(one.skippedBlurry, false);
+  assert.equal(one.skipped, 1);
+});
+
+test('pickFrames: near-tie on sharpness goes to the frame with more text', () => {
+  const s = [{ t: 0, sharpness: 10, detail: 5 }, { t: 0.1, sharpness: 9.8, detail: 20 }, { t: 0.2, sharpness: 6, detail: 40 }];
+  assert.deepEqual(pickFrames(s).times, [0.1]);
 });
 
 test('pickFrames: one blurry window at start or end does not nag', () => {

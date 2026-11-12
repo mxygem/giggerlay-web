@@ -21,6 +21,12 @@ This file is the spec; see CONTRACTS.md for the shared types and file layout.
 Stop 1 is the station ("Pick up"); deliveries start at 2. Rows marked
 "Pick up", "Pickup" or "Return..." are pickups and are left out.
 
+Real Flex today (Gem's recordings, 10/27): the pin sits on the card's first
+line ("Expected by 6:00 AM", "Next Stop:" on stop 2), 0.056 of the screen above
+the street (0.08 on Next Stop); then "# F.L03.OV", the street, the city,
+"Deliver 1 package". The station card says "Picked up at 2:21 AM". Streets can
+be lowercase, typeless ("1721 S. Lemon") or use SHRS.
+
 ## Amazon label format (OCR of a real label; recipient name replaced)
 ```
 JANE DOE
@@ -54,25 +60,38 @@ barcodes only, never OCR.
 
 **Itinerary parsing per page** (a screenshot, a slice, or a video frame): a stop
 is a street line with a street type, plain-word or ordinal name tokens, no
-"SCHEDULED". Its pin is a 1-3 digit line ("9", "12)", never 0) at least 0.03 to
-the left and within 0.03 vertically. Split "9 1007 ANITA AVE" into pin + street.
+"SCHEDULED"; or a typeless street (1-2 words) with a city line right below
+(after any unit line) and "Deliver N package" just after. Its pin is a 1-3
+digit line ("9", "12)", "12 Expected by...", never 0) at least 0.03 to the
+left, from 0.12 above to 0.03 below, never across another street line. Split "9 1007 ANITA AVE" into pin + street.
 Packages from "Deliver N package(s)" within the next 3 lines.
 - NEVER OCR a lone pin digit by cropping: 6 and 9 flip. Fill missing pins from
   row spacing measured between read pins on the same page; fill only at a whole
   number of rows with both sides agreeing, or one row from a single side.
 - NEVER assume the next street found is the next stop.
 
-**Across pages**: drop any number or street ever seen as a pickup. Vote per stop
-number (most common street; ties go to one with a unit, then earliest; packages
-by vote). Unnumbered readings matching a known stop (score >= 0.85) are dropped;
-others get previous number + 1 and are marked guessed.
+**Across pages**: readings are lined up into one ordered list of stops. A
+reading with the same pin, or the same address (>= 0.85), anchors to a known
+stop; readings between anchors join the stop in their position when they look
+like it (same house number, or same length with <= 2 digits off and a similar
+name), so "3552 b Enid Ave" votes for 3332 E Enid Ave. An unpinned stop seen in
+under half of the 3+ pages that show both neighbors is dropped. Each stop takes
+its most common street (ties: unit, then earliest), pin and package count. Drop
+any number or street ever seen as a pickup. Numbers: the pin when read, else
+previous + 1, guessed; the station counts as 1 even unread. An unpinned stop
+with no room before the next pinned number is left out (a gap beats a wrong
+number). A number read once whose street won under a better-read number is
+dropped.
 
 **Import**: slice images taller than 2.6x their width into screen-shaped tiles
 (2.17x tall) with 30% overlap. For videos: skim small frames every 0.1s scoring
-sharpness (mean vertical pixel change), then OCR the sharpest frame in each
-0.4s window if it's at least 0.88x the video's 90th-percentile sharpness and
-isn't a repeat (24x52 grayscale fingerprint, mean diff < 2). If blurry
-stretches were skipped, say "record again a little slower". An import that
+sharpness (vertical over horizontal pixel change, so a frame that just shows
+less text isn't called blurry; nearly blank frames count as sharp), then OCR,
+per 0.4s window, the frame with the most text among those within 3% of the
+sharpest, if it's at least 0.88x the video's 90th-percentile sharpness and
+isn't a repeat (24x52 grayscale fingerprint, mean diff < 2). If a blurry
+stretch of 2+ windows was skipped and stops are missing, say "record again a
+little slower". An import that
 finds no stops leaves the saved route alone.
 
 **Review ("Check these")**: missing numbers from stop 2 as ranges ("14-15"),
@@ -83,7 +102,9 @@ hand, numbered from 1.
 
 **Load screen**: camera with a guide frame, big stop number in the zone color,
 the address, "Stops 2-11 · package 2 of 3". Orange "12 or 13" when ambiguous,
-red "?" when not on route. A stop needs 2 agreeing frames; "not on route" needs
+orange "9?" ("House number is cut off", spoken "Maybe 9", not counted) when the
+label's house number lost its first digits (2+ digits left, the end of exactly
+one stop's number), red "?" when not on route. A stop needs 2 agreeing frames; "not on route" needs
 5. After 1s with no address, the next label is a new package (same stop
 announced again); a different TBA barcode on the same stop also re-announces.
 Count packages per stop by TBA. Zone colors (green, blue, orange, purple, pink,

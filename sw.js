@@ -5,7 +5,7 @@
 //   takes over at once, and the page reloads itself when it is safe.
 // - OCR / barcode libraries and language data from the CDNs are cached on
 //   first use (their URLs are pinned, so cache-first is safe).
-const VERSION = 'v2';
+const VERSION = 'v3';
 const SHELL_CACHE = `giggerlay-shell-${VERSION}`;
 const RUNTIME_CACHE = 'giggerlay-runtime';
 const CDN_CACHE = 'giggerlay-cdn-v1';

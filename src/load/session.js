@@ -15,6 +15,7 @@ const IDLE = Object.freeze({ kind: 'idle', text: '', color: '#000000', address: 
 function keyOf(r) {
   if (r.kind === 'stop') return `s${r.stop.number}`;
   if (r.kind === 'ambiguous') return `a${r.stops.map((s) => s.number).sort((a, b) => a - b).join(',')}`;
+  if (r.kind === 'partial') return `p${r.stop.number}`;
   if (r.kind === 'notOnRoute') return 'n';
   return null;
 }
@@ -80,10 +81,16 @@ export function createLoadSession(route, settings = DEFAULT_SETTINGS, { now = Da
       const nums = result.stops.map((s) => s.number);
       return { kind: 'ambiguous', text: orList(nums), color: AMBIGUOUS_COLOR, address: formatStreet(result.address), zoneLabel: '', packageLabel: '' };
     }
+    if (result.kind === 'partial') {
+      // House number cut off on the label: a likely stop, not counted as a package.
+      return { kind: 'partial', text: `${result.stop.number}?`, color: AMBIGUOUS_COLOR, address: formatStreet(result.stop.address), zoneLabel: 'House number is cut off', packageLabel: '' };
+    }
     return { kind: 'notOnRoute', text: '?', color: NOT_ON_ROUTE_COLOR, address: result.address ? formatStreet(result.address) : '', zoneLabel: 'Not on route', packageLabel: '' };
   }
 
-  const spoken = (r) => (r.kind === 'notOnRoute' ? 'Not on route' : r.kind === 'ambiguous' ? orList(r.stops.map((s) => s.number)) : String(r.stop.number));
+  const spoken = (r) => (r.kind === 'notOnRoute' ? 'Not on route'
+    : r.kind === 'ambiguous' ? orList(r.stops.map((s) => s.number))
+      : r.kind === 'partial' ? `Maybe ${r.stop.number}` : String(r.stop.number));
 
   function onFrame({ lines = [], barcodes = [] } = {}) {
     const t = now();

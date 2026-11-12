@@ -4,14 +4,15 @@
 import { recognize } from '../ocr.js';
 import { parsePage as defaultParsePage, mergePages as defaultMergePages } from '../itinerary.js';
 import { slicePlan } from './slice.js';
-import { sharpness } from './sharpness.js';
+import { measure } from './sharpness.js';
 import { fingerprint, fingerprintDiff } from './fingerprint.js';
 import { pickFrames } from './frames.js';
+import { reviewIssues } from '../review.js';
 
 export const SLOWER = 'record again a little slower';
 export const NO_STOPS = 'No stops found';
 const STEP = 0.1; // skim step, seconds
-const SKIM_W = 120; // skim canvas width, px
+const SKIM_W = 180; // skim canvas width, px
 const REPEAT_DIFF = 2; // fingerprint diff below this = same screen
 const SEEK_TIMEOUT = 4000;
 
@@ -39,7 +40,8 @@ export async function importFiles(files, opts = {}) {
     }
   }
   const merged = pages.length ? mergePages(pages) : { stops: [] };
-  if (blurry) warnings.push(SLOWER);
+  // Only worth a re-record when the blurry stretch actually cost stops.
+  if (blurry && merged.stops?.length && reviewIssues(merged.stops).missing.length) warnings.push(SLOWER);
   if (!merged.stops?.length) warnings.push(NO_STOPS);
   return { pages, stops: merged.stops ?? [], header: merged.header, warnings };
 }
@@ -135,7 +137,7 @@ async function readVideo(file, { ocr, parsePage, pages, progress }) {
     for (let i = 0; i < n; i++) {
       const t = Math.min(dur - 0.01, i * STEP + 0.02); // just after the step mark
       await seek(v, t);
-      samples.push({ t, sharpness: sharpness(grab()) });
+      samples.push({ t, ...measure(grab()) });
       if (i % 5 === 4 || i === n - 1) progress(i + 1, n, 'skim');
     }
 

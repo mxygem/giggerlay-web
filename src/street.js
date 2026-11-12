@@ -65,6 +65,8 @@ const TYPE_VARIANTS = {
   RTE: ['RTE', 'ROUTE'],
   TRCE: ['TRCE', 'TRACE'],
   VLY: ['VLY', 'VALLEY'],
+  SHRS: ['SHRS', 'SHORES'],
+  SHR: ['SHR', 'SHORE'],
 };
 const TYPE_MAP = new Map();
 for (const [norm, vs] of Object.entries(TYPE_VARIANTS)) for (const v of vs) TYPE_MAP.set(v, norm);
@@ -184,6 +186,46 @@ export function parseStreetDetail(text) {
 /** Parse one line into a StreetAddress, or null. */
 export function parseStreet(text) {
   return parseStreetDetail(text)?.address ?? null;
+}
+
+/**
+ * A street with no type, as Flex prints what the customer typed ("1721 S.
+ * Lemon"): house number, optional direction, 1-2 plain words, optional unit,
+ * nothing else. Only for itineraries, where the card around it is checked too.
+ * @returns {import('./contracts.js').StreetAddress|null}
+ */
+export function parseTypelessStreet(text) {
+  if (isRejectedLine(text)) return null;
+  const up = tokenize(text).map((t) => t.toUpperCase());
+  const number = houseNumber(up[0] ?? '');
+  if (!number) return null;
+  let k = 1;
+  const direction = up.length > 2 ? DIRECTION_WORDS[up[k]] : undefined;
+  if (direction) k++;
+  const name = [];
+  while (k < up.length && name.length < 2 && /^[A-Z]+$/.test(up[k]) && !UNIT_MARKERS.has(up[k]) && !normalizeType(up[k])) name.push(up[k++]);
+  if (!name.length) return null;
+  let unit;
+  if (UNIT_MARKERS.has(up[k])) {
+    const v = up[k + 1]?.replace(/^#/, '');
+    if (!v || !UNIT_VALUE.test(v)) return null;
+    unit = v;
+    k += 2;
+  }
+  if (k !== up.length) return null;
+  // OCR can run the type into the name ("2214 VERNIERRD"): split it back off
+  // when a long enough name is left.
+  const glued = /^([A-Z]{5,})(AVE|RD|DR|LN|CT|BLVD|CIR)$/.exec(name[name.length - 1]);
+  if (glued && !unit) {
+    name[name.length - 1] = glued[1];
+    const a = { number, name: name.join(' '), type: glued[2] };
+    if (direction) a.direction = direction;
+    return a;
+  }
+  const a = { number, name: name.join(' ') };
+  if (direction) a.direction = direction;
+  if (unit) a.unit = unit;
+  return a;
 }
 
 /** "10635 E HAMPTON AVE APT 3056". */

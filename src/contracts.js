@@ -8,7 +8,7 @@
 
 /**
  * A parsed street address, uppercase.
- * @typedef {{number: string, direction?: string, name: string, type: string, unit?: string}} StreetAddress
+ * @typedef {{number: string, direction?: string, name: string, type?: string, unit?: string}} StreetAddress
  */
 
 /**
@@ -22,6 +22,7 @@
 /**
  * @typedef {{kind: 'stop', stop: RouteStop, score: number, address: StreetAddress}
  *   | {kind: 'ambiguous', stops: RouteStop[], score: number, address: StreetAddress}
+ *   | {kind: 'partial', stop: RouteStop, address: StreetAddress}
  *   | {kind: 'notOnRoute', address: StreetAddress}
  *   | {kind: 'noAddress'}} MatchResult
  */
